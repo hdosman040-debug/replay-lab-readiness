@@ -175,8 +175,23 @@ export function CandleChart({
       bump();
     });
     ro.observe(el);
-    // price scale changes (autoscale) don't emit events — poll cheaply while mounted
-    const iv = window.setInterval(bump, 250);
+    // Price-scale changes (autoscale, vertical drag) don't emit events. Poll a
+    // cheap geometry signature and only re-render overlays when it changed —
+    // an unconditional bump re-rendered every overlay 4×/s even when idle.
+    let lastSig = "";
+    const iv = window.setInterval(() => {
+      const s = seriesRef.current;
+      if (!s || document.hidden) return;
+      const last = candlesRef.current[candlesRef.current.length - 1];
+      if (!last) return;
+      const y1 = s.priceToCoordinate(last.close);
+      const y2 = s.priceToCoordinate(last.close + 100);
+      const sig = `${y1?.toFixed(1)}|${y2?.toFixed(1)}`;
+      if (sig !== lastSig) {
+        lastSig = sig;
+        bump();
+      }
+    }, 250);
 
     return () => {
       ro.disconnect();
@@ -203,16 +218,21 @@ export function CandleChart({
     });
     const first = candles[0];
     const prevFirst = prev[0];
+    const lastIdx = prev.length - 1;
+    // lightweight-charts can only update the LAST bar or append newer bars.
+    // Everything before the previous last bar must be byte-identical; the
+    // previous last bar may have changed (forming -> completed/extended).
     const incremental =
-      prev.length > 0 &&
-      first &&
-      prevFirst &&
+      prev.length > 1 &&
+      !!first &&
+      !!prevFirst &&
       first.time === prevFirst.time &&
       candles.length >= prev.length &&
-      candles.length - prev.length <= 3;
+      candles.length - prev.length <= 3 &&
+      candles[lastIdx]!.time === prev[lastIdx]!.time &&
+      sameBar(candles[lastIdx - 1]!, prev[lastIdx - 1]!);
     if (incremental) {
-      const start = Math.max(0, prev.length - 2);
-      for (let i = start; i < candles.length; i++) {
+      for (let i = lastIdx; i < candles.length; i++) {
         const c = candles[i];
         if (c) series.update(toBar(c));
       }
@@ -323,4 +343,8 @@ function countBefore(cs: Candle[], t: number) {
   let i = 0;
   while (i < cs.length && cs[i]!.time < t) i++;
   return i;
+}
+
+function sameBar(a: Candle, b: Candle) {
+  return a.time === b.time && a.open === b.open && a.high === b.high && a.low === b.low && a.close === b.close;
 }
