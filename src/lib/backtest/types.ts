@@ -67,26 +67,66 @@ export const emptyAnalysis = (): Analysis => ({
   reasonForNoTrade: "",
 });
 
-export type TradeStatus = "planned" | "active" | "closed";
+/**
+ * Trade lifecycle (the trader defines every level; the app only measures):
+ *   draft    — levels being placed, no order yet (not evaluated)
+ *   planned  — order placed at `plannedAt`; waiting for price to reach entry
+ *   active   — replay traded through the entry (activatedAt)
+ *   closed   — stop, target or manual close reached (closedAt)
+ * Status is DERIVED from the replay clock by `evaluateTrade` — it is never
+ * typed in by hand and never uses a candle that has not closed yet.
+ */
+export type TradeStatus = "draft" | "planned" | "active" | "closed";
 export type TradeResult = "win" | "loss" | "breakeven";
+export type EntryType = "limit" | "market";
+export type CloseReason = "tp" | "sl" | "manual";
+
+/** A manual stop/target change while the trade is live; applies to M1 candles opening at or after `at`. */
+export interface LevelAdjustment {
+  at: number;
+  stopLoss: number;
+  takeProfit: number;
+}
 
 export interface TradePlan {
   id: string;
   direction: Direction;
   entry: number;
+  /** ORIGINAL planned stop — defines 1R */
   stopLoss: number;
+  /** ORIGINAL planned target */
   takeProfit: number;
+  /** snapshot / legacy; the live status is derived by the replay engine */
   status: TradeStatus;
-  plannedAt: number; // replay time
+  /** replay time the order was placed (armed). For drafts: when the draft was created. */
+  plannedAt: number;
+  /** replay time the draft was first created — hides the plan when rewinding before it */
+  createdAt?: number;
+  /** true once "Place order" / "Enter at market" was pressed */
+  armed?: boolean;
+  entryType?: EntryType;
+  /** last closed price when the order was placed — decides stop-vs-limit trigger side */
+  refPrice?: number;
+  adjustments?: LevelAdjustment[];
+  /** replay time the trader pressed "Close at market" */
+  manualCloseAt?: number;
+  /* ---- measured snapshot (written when the trade is journaled) ---- */
   activatedAt?: number;
   closedAt?: number;
-  /** what the replay observed after activation (informational only) */
+  closeReason?: CloseReason;
+  /** legacy field from v1 records */
   observed?: { hit: "tp" | "sl"; at: number } | null;
   result?: TradeResult;
   exitPrice?: number;
   resultR?: number;
   maxFavorableR?: number;
   maxAdverseR?: number;
+  timeInTradeSec?: number;
+  /** stop and target were both inside one M1 candle — stop assumed first */
+  ambiguous?: boolean;
+  /** effective stop / target at close (after adjustments) */
+  finalStopLoss?: number;
+  finalTakeProfit?: number;
 }
 
 export function riskDistance(t: Pick<TradePlan, "entry" | "stopLoss">) {
@@ -104,6 +144,24 @@ export function resultRAt(t: Pick<TradePlan, "entry" | "stopLoss" | "direction">
   if (r === 0) return 0;
   const pnl = t.direction === "long" ? exit - t.entry : t.entry - exit;
   return pnl / r;
+}
+export function classifyResult(r: number): TradeResult {
+  if (r > 0.05) return "win";
+  if (r < -0.05) return "loss";
+  return "breakeven";
+}
+
+/** Levels must be on the correct side for the direction. Returns a message or null. */
+export function validateLevels(t: Pick<TradePlan, "direction" | "entry" | "stopLoss" | "takeProfit">): string | null {
+  if (![t.entry, t.stopLoss, t.takeProfit].every((v) => Number.isFinite(v) && v > 0)) return "Enter valid prices";
+  if (t.direction === "long") {
+    if (t.stopLoss >= t.entry) return "Long stop must be below entry";
+    if (t.takeProfit <= t.entry) return "Long target must be above entry";
+  } else {
+    if (t.stopLoss <= t.entry) return "Short stop must be above entry";
+    if (t.takeProfit >= t.entry) return "Short target must be below entry";
+  }
+  return null;
 }
 
 export const WORKFLOW_STEPS = [
