@@ -231,12 +231,20 @@ export function CandleChart({
       candles.length - prev.length <= 3 &&
       candles[lastIdx]!.time === prev[lastIdx]!.time &&
       sameBar(candles[lastIdx - 1]!, prev[lastIdx - 1]!);
+    let applied = false;
     if (incremental) {
-      for (let i = lastIdx; i < candles.length; i++) {
-        const c = candles[i];
-        if (c) series.update(toBar(c));
+      try {
+        for (let i = lastIdx; i < candles.length; i++) {
+          const c = candles[i];
+          if (c) series.update(toBar(c));
+        }
+        applied = true;
+      } catch {
+        // never let a chart-library rejection take the workspace down
+        applied = false;
       }
-    } else {
+    }
+    if (!applied) {
       const keepRange = chart.timeScale().getVisibleLogicalRange();
       series.setData(candles.map(toBar));
       if (prev.length === 0) {
